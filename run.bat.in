@@ -1,0 +1,5 @@
+@echo off
+
+call "@OpenCASCADE_DIR@/env.bat" %1 %2 %3
+
+@PROJECT_NAME@
