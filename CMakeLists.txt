@@ -51,3 +51,7 @@ target_link_libraries      (${PROJECT_NAME} PRIVATE
 )
 
 configure_file ("${CMAKE_CURRENT_SOURCE_DIR}/run.bat.in" "${CMAKE_CURRENT_BINARY_DIR}/run.bat" @ONLY)
+
+install (TARGETS ${PROJECT_NAME} RUNTIME DESTINATION ".")
+
+install (FILES "${CMAKE_CURRENT_BINARY_DIR}/run.bat" DESTINATION "${CMAKE_INSTALL_PREFIX}")
