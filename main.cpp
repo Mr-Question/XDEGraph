@@ -24,12 +24,22 @@ static Standard_Integer XGraph (Draw_Interpretor&      theDI,
 {
   if ( theArgc < 3 )
   {
-    theDI << "Usage:\t XGraph DocName FileName\n";
+    theDI << "Usage:\t XGraph DocName FileName [-upward]\n";
     return 1;
   }
 
   Standard_CString              aDocName  = theArgv[1];
   const TCollection_AsciiString aFileName = theArgv[2];
+
+  Standard_Boolean isUpward = Standard_False;
+  for (Standard_Integer aArgIt = 3; aArgIt < theArgc; ++aArgIt)
+  {
+    const TCollection_AsciiString aParam (theArgv[aArgIt]);
+    if (aParam == "-upward")
+    {
+      isUpward = Standard_True;
+    }
+  }
 
   Handle(TDocStd_Document) aD;
   if (!DDocStd::GetDocument (aDocName, aD, Standard_False))
@@ -51,7 +61,8 @@ static Standard_Integer XGraph (Draw_Interpretor&      theDI,
   aStream << "ENDSEC;" << std::endl;
   aStream << "DATA;" << std::endl;
 
-  NCollection_IndexedDataMap<TCollection_AsciiString, std::pair<TDF_Label, std::list<Standard_Integer>>> aLabelMap;
+  NCollection_IndexedDataMap<TCollection_AsciiString, TDF_Label> aLabelMap;
+  NCollection_DataMap<Standard_Integer, std::list<Standard_Integer>> aDependencyMap;
   NCollection_DataMap<Handle(TDF_Attribute), Standard_Integer> aAttMap;
 
   auto AddEntry = [&](
@@ -75,14 +86,23 @@ static Standard_Integer XGraph (Draw_Interpretor&      theDI,
   {
     TDF_Tool::Entry (theLabel, theEntry);
 
-    if (auto aItem = aLabelMap.ChangeSeek (theEntry))
+    const Standard_Boolean isToAdd = !aLabelMap.Contains (theEntry);
+    const Standard_Integer aId = isToAdd ?
+      aLabelMap.Add (theEntry, theLabel):
+      aLabelMap.FindIndex (theEntry);
+
+    const Standard_Integer aFirstId  = isUpward ? aId : theParentId;
+    const Standard_Integer aSecondId = isUpward ? theParentId : aId;
+
+    auto aList = aDependencyMap.ChangeSeek (aFirstId);
+    if (aList == nullptr)
     {
-      aItem->second.push_back (theParentId);
-      return false;
+      aDependencyMap.Bind (aFirstId, std::list<Standard_Integer>{});
+      aList = aDependencyMap.ChangeSeek (aFirstId);
     }
 
-    return aLabelMap.Add (theEntry, std::make_pair(theLabel, std::list{theParentId}));
-    return true;
+    aList->push_back (aSecondId);
+    return isToAdd;
   };
 
   std::stack<std::pair<TDF_Label, Standard_Integer>> aStack;
@@ -91,6 +111,13 @@ static Standard_Integer XGraph (Draw_Interpretor&      theDI,
   {
     aStack.push (std::make_pair (aIt.Value(), 0));
   }
+
+  auto PushToStack = [&aStack](const TDF_LabelSequence& theLabels, const Standard_Integer theParentId){
+    for (TDF_LabelSequence::Iterator aIt (theLabels); aIt.More(); aIt.Next())
+    {
+      aStack.push (std::make_pair (aIt.Value(), theParentId));
+    }
+  };
 
   while (!aStack.empty())
   {
@@ -115,77 +142,73 @@ static Standard_Integer XGraph (Draw_Interpretor&      theDI,
     TDF_LabelSequence aComps;
     if (aShapeTool->GetComponents (aLabel.first, aComps))
     {
-      for (TDF_LabelSequence::Iterator aCompIt (aComps); aCompIt.More(); aCompIt.Next())
-      {
-        aStack.push (std::make_pair (aCompIt.Value(), aParentId));
-      }
+      PushToStack (aComps, aParentId);
+    }
+
+    TDF_LabelSequence aSubs;
+    if (aShapeTool->GetSubShapes (aLabel.first, aSubs))
+    {
+      PushToStack (aSubs, aParentId);
     }
   }
 
   for (Standard_Integer aId = 1; aId <= aLabelMap.Size(); ++aId)
   {
-    const std::pair<TDF_Label, std::list<Standard_Integer>>& aLabel = aLabelMap (aId);
+    const TDF_Label& aLabel = aLabelMap (aId);
 
     const TCollection_AsciiString& aEntry = aLabelMap.FindKey (aId);
 
     TCollection_AsciiString aTag;
-    if (aShapeTool->IsReference (aLabel.first))
+    if (aShapeTool->IsReference (aLabel))
     {
       aTag = "REFERENCE";
     }
-    else if (aShapeTool->IsAssembly (aLabel.first))
+    else if (aShapeTool->IsAssembly (aLabel))
     {
       aTag = "ASSEMBLY";
     }
-    else if (aShapeTool->IsComponent (aLabel.first))
+    else if (aShapeTool->IsComponent (aLabel))
     {
       aTag = "COMPONENT";
     }
-    else if (aShapeTool->IsExternRef (aLabel.first))
+    else if (aShapeTool->IsExternRef (aLabel))
     {
       aTag = "EXTERN_REF";
     }
-    else if (aShapeTool->IsSimpleShape (aLabel.first))
+    else if (aShapeTool->IsSimpleShape (aLabel))
     {
       aTag = "SHAPE";
     }
-//    else if (aShapeTool->IsShape (aLabel.first))
+//    else if (aShapeTool->IsShape (aLabel))
 //    {
 //      aTag = "SHAPE";
-//      if (aShapeTool->IsCompound (aLabel.first))
+//      if (aShapeTool->IsCompound (aLabel))
 //      {
 //        aTag = "COMPOUND";
 //      }
 //    }
-//    else if (aShapeTool->IsSubShape (aLabel.first))
+//    else if (aShapeTool->IsSubShape (aLabel))
 //    {
 //      aTag = "SUBSHAPE";
 //    }
 
     AddEntry (aId, aTag.ToCString(), aEntry.ToCString(), [&](){
-      // PARENT
-      if (!aLabel.second.empty())
+      // DEPENDENCY
+      if (auto aList = aDependencyMap.Seek (aId))
       {
-        Standard_Integer aParentCount = 0;
-        for (auto aParentId : aLabel.second)
+        Standard_Integer aDepencencyCount = 0;
+        for (auto aDepencencyId : *aList)
         {
-          if (aParentId > 0)
+          if (aDepencencyId > 0)
           {
-            if (aParentCount == 0)
-            {
-              aStream << "(";
-            }
-            else
-            {
-              aStream << ", ";
-            }
+            aStream << (aDepencencyCount == 0 ? "(" : ", ");
 
-            aStream << "#" << aParentId;
-            ++aParentCount;
+            aStream << "#" << aDepencencyId;
+            ++aDepencencyCount;
           }
         }
 
-        if (aParentCount > 0)
+        if (aDepencencyCount > 0)
         {
           aStream << "), ";
         }
@@ -195,7 +218,7 @@ static Standard_Integer XGraph (Draw_Interpretor&      theDI,
       aStream << "(";
 
       Standard_Integer aAttCount = 1;
-      for (TDF_AttributeIterator aAttIt (aLabel.first); aAttIt.More(); aAttIt.Next(), ++aAttCount)
+      for (TDF_AttributeIterator aAttIt (aLabel); aAttIt.More(); aAttIt.Next(), ++aAttCount)
       {
         Handle(TDF_Attribute) aAtt = aAttIt.Value();
 
